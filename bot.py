@@ -113,6 +113,20 @@ def get_dexscreener_data(contract):
         print(f"DexScreener error: {e}")
         return None
 
+# Command: /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = """👋 Hi there!
+To get started, simply type:
+
+/scan [ERC20 token address]
+
+I’ll provide you with a technical analysis (T.A.) based on the historical price of the token.
+
+💡 Friendly reminder: This tool is designed to help you analyze and explore tokens — it’s not financial advice.
+
+⚠️ Please make sure the token you scan has a historical price and is listed on CoinGecko."""
+    await update.message.reply_text(message)
+
 # Command: /scan
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
@@ -235,7 +249,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏦 <b>Market Cap:</b> {usd(data['market_cap'])}\n"
         f"💧 <b>Liquidity:</b> {usd(liquidity)}\n"
         f"📱 <b>Token Telegram:</b> {token_telegram_link}\n\n"
-        f"🔮 <b>24h Prediction (70-80% Accuracy)</b>\n"
+        f"🔮 <b>24h Prediction </b>\n"
         f"├─ 🏦 <i>Market Cap:</i> {predicted_mc_str} {pred_direction_emoji}\n"
         f"├─ 💰 <i>Price:</i> {predicted_price_str} {pred_direction_emoji}\n"
         f"└─ 📈 <i>Change:</i> {predicted_pct_str}\n\n"
@@ -257,6 +271,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(API_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("scan", scan))
     app.run_polling()
 
