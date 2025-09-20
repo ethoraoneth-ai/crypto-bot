@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 from datetime import datetime, timedelta
 from matplotlib.ticker import FuncFormatter, AutoLocator
 
-API_TOKEN = "8169710425:AAGIyILebCTxp5YdNkIyzI36qo4otELqk08"  # Your bot's API token
+API_TOKEN = "8422472212:AAE6ALc3DGFYjhTBgqLmUGlY5bJgc0LeoaA"  # Your bot's API token
 
 COINMARKETCAP_API_KEY = "YOUR_COINMARKETCAP_API_KEY"  # Replace with your CoinMarketCap API key
 
@@ -435,3 +435,4 @@ if __name__ == "__main__":
 # - Integrate ARIMA or LSTM (requires statsmodels or torch) for superior accuracy
 # - Add clamping and validation for predictions
 # - Handle API response variations for CoinGecko
+
