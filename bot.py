@@ -123,6 +123,10 @@ def get_dexscreener_data(contract):
         print(f"DexScreener error: {e}")
         return None
 
+# Command: /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Hi there!\nTo get started, simply type:\n\n/p [ERC20 token address]\n\nI’ll provide you with a technical analysis (T.A.) based on the historical price of the token.\n\n💡 Friendly reminder: This tool is designed to help you analyze and explore tokens — it’s not financial advice.\n\n⚠️ Please make sure the token you scan has a historical price and is listed on CoinGecko.")
+
 # Command: /p
 async def p(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
@@ -423,6 +427,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(API_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("p", p))
     app.add_handler(CommandHandler("l", leaderboard))
     app.add_handler(CallbackQueryHandler(button_callback, pattern="^tf_"))
@@ -435,4 +440,3 @@ if __name__ == "__main__":
 # - Integrate ARIMA or LSTM (requires statsmodels or torch) for superior accuracy
 # - Add clamping and validation for predictions
 # - Handle API response variations for CoinGecko
-
