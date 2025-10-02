@@ -1304,7 +1304,9 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Schedule repeating job
-    app.job_queue.run_repeating(monitor_trades, interval=60, first=10)
+    from datetime import timezone
+app.job_queue.run_repeating(monitor_trades, interval=60, first=10, tzinfo=timezone.utc)
+
 
     # Start the bot
     app.run_polling()
