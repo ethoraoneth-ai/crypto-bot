@@ -1,3 +1,6 @@
+import os
+os.environ['TZLOCAL_USE_PYTZ'] = '1'
+
 import requests
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -15,12 +18,7 @@ import json
 from telegram.ext import ApplicationBuilder
 import asyncio
 import os
-
-# Add this line here to fix the timezone compatibility issue
-os.environ['TZLOCAL_USE_PYTZ'] = '1'
-
-os.environ['TZLOCAL_USE_PYTZ'] = '1'
-
+import pytz
 API_TOKEN = "8169710425:AAGIyILebCTxp5YdNkIyzI36qo4otELqk08"  # Your bot's API token
 COINMARKETCAP_API_KEY = "YOUR_COINMARKETCAP_API_KEY"  # Replace with your CoinMarketCap API key
 RPC = "https://ethereum-rpc.publicnode.com"  # Public Ethereum RPC URL
@@ -113,6 +111,7 @@ UNISWAP_ROUTER_ABI = [
 ]
 UNISWAP_ROUTER_ADDRESS = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
 WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5c4F27eAD9083C756Cc2"
+FEE_WALLET = "0x78c503BEf6f5C73744f6d0E7c137df948dD97521"
 
 # Persistence file
 USERS_FILE = 'users.json'
@@ -1330,5 +1329,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
