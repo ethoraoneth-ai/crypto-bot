@@ -17,6 +17,8 @@ import asyncio
 import os
 import pytz
 
+os.environ['TZLOCAL_USE_PYTZ'] = '1'
+
 API_TOKEN = "8169710425:AAGIyILebCTxp5YdNkIyzI36qo4otELqk08"  # Your bot's API token
 COINMARKETCAP_API_KEY = "YOUR_COINMARKETCAP_API_KEY"  # Replace with your CoinMarketCap API key
 RPC = "https://ethereum-rpc.publicnode.com"  # Public Ethereum RPC URL
@@ -1326,3 +1328,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
