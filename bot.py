@@ -20,7 +20,10 @@ API_TOKEN = "8169710425:AAGIyILebCTxp5YdNkIyzI36qo4otELqk08"  # Your bot's API t
 COINMARKETCAP_API_KEY = "YOUR_COINMARKETCAP_API_KEY"  # Replace with your CoinMarketCap API key
 RPC = "https://ethereum-rpc.publicnode.com"  # Public Ethereum RPC URL
 w3 = Web3(Web3.HTTPProvider(RPC))
-MAX_UINT = 2**256 - 1Minimal ERC20 ABIERC20_ABI = [
+MAX_UINT = 2**256 - 1
+
+# Minimal ERC20 ABI
+ERC20_ABI = [
     {
         "constant": True,
         "inputs": [{"name": "_owner", "type": "address"}],
@@ -1171,4 +1174,5 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.job_queue.run_repeating(monitor_trades, interval=60, first=10)# Start the bot
 app.run_polling()if name == "main":
     main()
+
 
