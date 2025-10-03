@@ -108,9 +108,6 @@ UNISWAP_ROUTER_ABI = [
 ]
 UNISWAP_ROUTER_ADDRESS = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
 WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5c4F27eAD9083C756Cc2"
-FEE_WALLET = "0x78c503BEf6f5C73744f6d0E7c137df948dD97521"  # Persistence file
-USERS_FILE = 'users.json'  # Load users from file
-
 def load_users():
     # Function body goes here
     pass
@@ -1182,6 +1179,7 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.job_queue.run_repeating(monitor_trades, interval=60, first=10)# Start the bot
 app.run_polling()if name == "main":
     main()
+
 
 
 
