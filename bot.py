@@ -15,7 +15,9 @@ import json
 from telegram.ext import ApplicationBuilder
 import asyncio
 import os
-import pytz
+
+# Add this line here to fix the timezone compatibility issue
+os.environ['TZLOCAL_USE_PYTZ'] = '1'
 
 os.environ['TZLOCAL_USE_PYTZ'] = '1'
 
@@ -1328,4 +1330,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
