@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import io
 import numpy as np
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, Filters
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, Filters, run_async
 from datetime import datetime, timedelta
 from matplotlib.ticker import FuncFormatter, AutoLocator
 import secrets
@@ -110,19 +110,25 @@ WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5c4F27eAD9083C756Cc2"
 FEE_WALLET = "0x78c503BEf6f5C73744f6d0E7c137df948dD97521"
 
 # Persistence file
-USERS_FILE = 'users.json'
+USERS_FILE = os.path.join(os.path.dirname(__file__), 'users.json')
 
 # Load users from file
 def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, 'r') as f:
-            return json.load(f)
+    try:
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Load users error: {e}")
     return {}
 
 # Save users to file
 def save_users(users):
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users, f)
+    try:
+        with open(USERS_FILE, 'w') as f:
+            json.dump(users, f)
+    except Exception as e:
+        print(f"Save users error: {e}")
 
 # Global user data storage
 users = load_users()  # user_id: {'address': str, 'private_key': str, 'trades': list of dicts}
@@ -291,7 +297,7 @@ def get_human_error(error_str):
     return error_str
 
 # Buy token on Uniswap
-def buy_token(user_id, contract, amount_eth, context=None):
+def buy_token(user_id, contract, amount_eth):
     if user_id not in users:
         return None, "No wallet", None
     address = users[user_id]['address']
@@ -364,7 +370,7 @@ def buy_token(user_id, contract, amount_eth, context=None):
     return amount_token, '0x' + tx_hash.hex()[2:], decimals
 
 # Sell token on Uniswap
-def sell_token(user_id, contract, amount_token, context=None, is_profit=False, chat_id=None, slippage=50):
+def sell_token(user_id, contract, amount_token, is_profit=False, slippage=50):
     if user_id not in users:
         return "No wallet", 0
     address = users[user_id]['address']
@@ -383,8 +389,6 @@ def sell_token(user_id, contract, amount_token, context=None, is_profit=False, c
     # Check allowance
     allowance = token.functions.allowance(address, w3.to_checksum_address(UNISWAP_ROUTER_ADDRESS)).call()
     if allowance < amount_token:
-        if chat_id and context:
-            pending_msg = context.bot.send_message(chat_id=chat_id, text=" Approving tokens...")
         nonce = w3.eth.get_transaction_count(address)
         try:
             approve_call = token.functions.approve(
@@ -402,8 +406,6 @@ def sell_token(user_id, contract, amount_token, context=None, is_profit=False, c
             approve_receipt = w3.eth.wait_for_transaction_receipt(approve_hash, timeout=600)
             if approve_receipt['status'] != 1:
                 return "Approve transaction reverted. Check token contract or increase gas via /gas.", 0
-            if chat_id and context:
-                pending_msg.edit_text(" Tokens approved. Waiting 10s for confirmation...")
             time.sleep(10)  # Delay to ensure approval is processed
         except Exception as e:
             return get_human_error(str(e)), 0
@@ -474,6 +476,7 @@ def sell_token(user_id, contract, amount_token, context=None, is_profit=False, c
     return '0x' + tx_hash.hex()[2:], sold_usd
 
 # Monitor trades
+@run_async
 def monitor_trades(context):
     for user_id_str, user_data in list(users.items()):
         trades = user_data.get('trades', [])
@@ -501,33 +504,39 @@ def monitor_trades(context):
             current_profit_usd = current_value - trade['buy_cost_usd']
             if trade['tp_pct'] > 0 and change >= trade['tp_pct']:
                 pending_msg = context.bot.send_message(chat_id=user_id_str, text=" Selling due to take profit...")
-                tx_hash, sold_usd = sell_token(user_id_str, trade['contract'], trade['amount_token'], context=context, is_profit=True, chat_id=user_id_str)
-                if tx_hash.startswith('0x'):
-                    pending_msg.edit_text(f" Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
-                    if 'message_id' in trade:
-                        try:
-                            context.bot.delete_message(chat_id=user_id_str, message_id=trade['message_id'])
-                        except:
-                            pass
-                    del trades[trade_idx]
-                    save_users(users)
-                else:
-                    pending_msg.edit_text(f" Transaction failed: {tx_hash}")
+                def async_sell_tp():
+                    tx_hash, sold_usd = sell_token(user_id_str, trade['contract'], trade['amount_token'], is_profit=True)
+                    if tx_hash.startswith('0x'):
+                        context.bot.edit_message_text(chat_id=user_id_str, message_id=pending_msg.message_id, text=f" Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
+                        if 'message_id' in trade:
+                            try:
+                                context.bot.delete_message(chat_id=user_id_str, message_id=trade['message_id'])
+                            except:
+                                pass
+                        trades = users[user_id_str]['trades']
+                        del trades[trade_idx]
+                        save_users(users)
+                    else:
+                        context.bot.edit_message_text(chat_id=user_id_str, message_id=pending_msg.message_id, text=f" Transaction failed: {tx_hash}")
+                context.dispatcher.run_async(async_sell_tp, update=None)
                 continue
             elif trade['sl_pct'] > 0 and change <= -trade['sl_pct']:
                 pending_msg = context.bot.send_message(chat_id=user_id_str, text=" Selling due to stop loss...")
-                tx_hash, sold_usd = sell_token(user_id_str, trade['contract'], trade['amount_token'], context=context, is_profit=False, chat_id=user_id_str)
-                if tx_hash.startswith('0x'):
-                    pending_msg.edit_text(f" Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
-                    if 'message_id' in trade:
-                        try:
-                            context.bot.delete_message(chat_id=user_id_str, message_id=trade['message_id'])
-                        except:
-                            pass
-                    del trades[trade_idx]
-                    save_users(users)
-                else:
-                    pending_msg.edit_text(f" Transaction failed: {tx_hash}")
+                def async_sell_sl():
+                    tx_hash, sold_usd = sell_token(user_id_str, trade['contract'], trade['amount_token'], is_profit=False)
+                    if tx_hash.startswith('0x'):
+                        context.bot.edit_message_text(chat_id=user_id_str, message_id=pending_msg.message_id, text=f" Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
+                        if 'message_id' in trade:
+                            try:
+                                context.bot.delete_message(chat_id=user_id_str, message_id=trade['message_id'])
+                            except:
+                                pass
+                        trades = users[user_id_str]['trades']
+                        del trades[trade_idx]
+                        save_users(users)
+                    else:
+                        context.bot.edit_message_text(chat_id=user_id_str, message_id=pending_msg.message_id, text=f" Transaction failed: {tx_hash}")
+                context.dispatcher.run_async(async_sell_sl, update=None)
                 continue
             
             # Update tracking message
@@ -724,53 +733,52 @@ def transfer_amount(update, context):
     to_addr = context.user_data['transfer_to']
     gas_price = get_user_gas_price(user_id)
     pending_msg = update.message.reply_text(" Your transfer is pending...")
-    if what == 'eth':
-        balance = w3.eth.get_balance(users[user_id]['address'])
-        amount = int(balance * (pct / 100))
-        try:
-            tx = {
-                'to': to_addr,
-                'value': amount,
-                'gas': 21000,
-                'gasPrice': gas_price,
-                'nonce': w3.eth.get_transaction_count(users[user_id]['address']),
-                'chainId': w3.eth.chain_id
-            }
-            signed = Account.sign_transaction(tx, users[user_id]['private_key'])
-            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=600)
-            if receipt['status'] != 1:
-                pending_msg.edit_text(" Transfer failed: Transaction reverted.")
-                return ConversationHandler.END
-            pending_msg.edit_text(f" Transfer successful! Etherscan: https://etherscan.io/tx/{'0x' + tx_hash.hex()[2:]}")
-        except Exception as e:
-            error_msg = get_human_error(str(e))
-            pending_msg.edit_text(f" Transfer failed: {error_msg}")
-            return ConversationHandler.END
-    else:
-        try:
-            token_address = w3.to_checksum_address(what)
-            token = w3.eth.contract(address=token_address, abi=ERC20_ABI)
-            balance = token.functions.balanceOf(users[user_id]['address']).call()
+    def async_transfer():
+        if what == 'eth':
+            balance = w3.eth.get_balance(users[user_id]['address'])
             amount = int(balance * (pct / 100))
-            tx = token.functions.transfer(to_addr, amount).build_transaction({
-                'from': users[user_id]['address'],
-                'gasPrice': gas_price,
-                'nonce': w3.eth.get_transaction_count(users[user_id]['address']),
-            })
-            tx['gas'] = int(token.functions.transfer(to_addr, amount).estimate_gas({'from': users[user_id]['address']}) * 1.2)
-            signed = Account.sign_transaction(tx, users[user_id]['private_key'])
-            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=600)
-            if receipt['status'] != 1:
-                pending_msg.edit_text(" Transfer failed: Transaction reverted.")
-                return ConversationHandler.END
-            pending_msg.edit_text(f" Transfer successful! Etherscan: https://etherscan.io/tx/{'0x' + tx_hash.hex()[2:]}")
-        except Exception as e:
-            error_msg = get_human_error(str(e))
-            pending_msg.edit_text(f" Transfer failed: {error_msg}")
-            return ConversationHandler.END
-
+            try:
+                tx = {
+                    'to': to_addr,
+                    'value': amount,
+                    'gas': 21000,
+                    'gasPrice': gas_price,
+                    'nonce': w3.eth.get_transaction_count(users[user_id]['address']),
+                    'chainId': w3.eth.chain_id
+                }
+                signed = Account.sign_transaction(tx, users[user_id]['private_key'])
+                tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=600)
+                if receipt['status'] != 1:
+                    context.bot.edit_message_text(chat_id=update.message.chat_id, message_id=pending_msg.message_id, text=" Transfer failed: Transaction reverted.")
+                    return
+                context.bot.edit_message_text(chat_id=update.message.chat_id, message_id=pending_msg.message_id, text=f" Transfer successful! Etherscan: https://etherscan.io/tx/{'0x' + tx_hash.hex()[2:]}")
+            except Exception as e:
+                error_msg = get_human_error(str(e))
+                context.bot.edit_message_text(chat_id=update.message.chat_id, message_id=pending_msg.message_id, text=f" Transfer failed: {error_msg}")
+        else:
+            try:
+                token_address = w3.to_checksum_address(what)
+                token = w3.eth.contract(address=token_address, abi=ERC20_ABI)
+                balance = token.functions.balanceOf(users[user_id]['address']).call()
+                amount = int(balance * (pct / 100))
+                tx = token.functions.transfer(to_addr, amount).build_transaction({
+                    'from': users[user_id]['address'],
+                    'gasPrice': gas_price,
+                    'nonce': w3.eth.get_transaction_count(users[user_id]['address']),
+                })
+                tx['gas'] = int(token.functions.transfer(to_addr, amount).estimate_gas({'from': users[user_id]['address']}) * 1.2)
+                signed = Account.sign_transaction(tx, users[user_id]['private_key'])
+                tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=600)
+                if receipt['status'] != 1:
+                    context.bot.edit_message_text(chat_id=update.message.chat_id, message_id=pending_msg.message_id, text=" Transfer failed: Transaction reverted.")
+                    return
+                context.bot.edit_message_text(chat_id=update.message.chat_id, message_id=pending_msg.message_id, text=f" Transfer successful! Etherscan: https://etherscan.io/tx/{'0x' + tx_hash.hex()[2:]}")
+            except Exception as e:
+                error_msg = get_human_error(str(e))
+                context.bot.edit_message_text(chat_id=update.message.chat_id, message_id=pending_msg.message_id, text=f" Transfer failed: {error_msg}")
+    context.dispatcher.run_async(async_transfer, update=update)
     return ConversationHandler.END
 
 # Handle non-command messages
@@ -797,34 +805,36 @@ def handle_message(update, context):
                 update.message.reply_text("Invalid amount.")
                 return
             pending_msg = update.message.reply_text(" Your buy transaction is pending...")
-            amount_token, tx_hash, decimals = buy_token(user_id, contract, amount_eth, context=context)
-            if amount_token is None:
-                pending_msg.edit_text(f" Transaction failed: {tx_hash}")
-                return
-            pending_msg.edit_text(f" Transaction successful! Etherscan: https://etherscan.io/tx/{tx_hash}")
-            data = get_coingecko_data(contract) or get_coinmarketcap_data(contract)
-            price = data['price'] if data else 0
-            buy_cost_usd = amount_eth * (get_eth_price() or 0)
-            trade = {
-                'contract': contract,
-                'amount_token': amount_token,
-                'decimals': decimals,
-                'buy_price': price,
-                'buy_cost_usd': buy_cost_usd,
-                'tp_pct': 0,
-                'sl_pct': 0
-            }
-            if 'trades' not in users[user_id]:
-                users[user_id]['trades'] = []
-            users[user_id]['trades'].append(trade)
-            save_users(users)
-            trade_index = len(users[user_id]['trades']) - 1
-            keyboard = [
-                [InlineKeyboardButton("1", callback_data="tp_1"), InlineKeyboardButton("2", callback_data="tp_2"), InlineKeyboardButton("3", callback_data="tp_3"), InlineKeyboardButton("5", callback_data="tp_5")],
-                [InlineKeyboardButton("Custom", callback_data="tp_custom"), InlineKeyboardButton("None", callback_data="tp_0")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            update.message.reply_text("Set take profit multiplier (1 = 100% gain, etc.):", reply_markup=reply_markup)
+            def async_handle_buy(contract, amount_eth, user_id, chat_id, pending_msg_id):
+                amount_token, tx_hash, decimals = buy_token(user_id, contract, amount_eth)
+                if amount_token is None:
+                    context.bot.edit_message_text(chat_id=chat_id, message_id=pending_msg_id, text=f" Transaction failed: {tx_hash}")
+                    return
+                context.bot.edit_message_text(chat_id=chat_id, message_id=pending_msg_id, text=f" Transaction successful! Etherscan: https://etherscan.io/tx/{tx_hash}")
+                data = get_coingecko_data(contract) or get_coinmarketcap_data(contract)
+                price = data['price'] if data else 0
+                buy_cost_usd = amount_eth * (get_eth_price() or 0)
+                trade = {
+                    'contract': contract,
+                    'amount_token': amount_token,
+                    'decimals': decimals,
+                    'buy_price': price,
+                    'buy_cost_usd': buy_cost_usd,
+                    'tp_pct': 0,
+                    'sl_pct': 0
+                }
+                if 'trades' not in users[user_id]:
+                    users[user_id]['trades'] = []
+                users[user_id]['trades'].append(trade)
+                save_users(users)
+                trade_index = len(users[user_id]['trades']) - 1
+                keyboard = [
+                    [InlineKeyboardButton("1", callback_data="tp_1"), InlineKeyboardButton("2", callback_data="tp_2"), InlineKeyboardButton("3", callback_data="tp_3"), InlineKeyboardButton("5", callback_data="tp_5")],
+                    [InlineKeyboardButton("Custom", callback_data="tp_custom"), InlineKeyboardButton("None", callback_data="tp_0")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                context.bot.send_message(chat_id=chat_id, text="Set take profit multiplier (1 = 100% gain, etc.):", reply_markup=reply_markup)
+            context.dispatcher.run_async(async_handle_buy, contract, amount_eth, user_id, update.message.chat_id, pending_msg.message_id, update=update)
             context.user_data.pop('contract', None)
             context.user_data.pop('in_buy_conv', None)
             return
@@ -857,11 +867,13 @@ def handle_message(update, context):
                 context.user_data.pop('in_sell_conv', None)
                 return
             pending_msg = update.message.reply_text(" Your sell transaction is pending...")
-            tx_hash, sold_usd = sell_token(user_id, contract, amount_token, context=context, chat_id=update.message.chat_id)
-            if tx_hash.startswith('0x'):
-                pending_msg.edit_text(f" Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
-            else:
-                pending_msg.edit_text(f" Transaction failed: {tx_hash}")
+            def async_handle_sell(contract, amount_token, user_id, chat_id, pending_msg_id):
+                tx_hash, sold_usd = sell_token(user_id, contract, amount_token)
+                if tx_hash.startswith('0x'):
+                    context.bot.edit_message_text(chat_id=chat_id, message_id=pending_msg_id, text=f" Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
+                else:
+                    context.bot.edit_message_text(chat_id=chat_id, message_id=pending_msg_id, text=f" Transaction failed: {tx_hash}")
+            context.dispatcher.run_async(async_handle_sell, contract, amount_token, user_id, update.message.chat_id, pending_msg.message_id, update=update)
             context.user_data.pop('contract', None)
             context.user_data.pop('in_sell_conv', None)
             return
@@ -925,21 +937,24 @@ def handle_message(update, context):
             update.message.reply_text("Invalid sell amount: too small or zero.")
             return
         pending_msg = update.message.reply_text(" Your sell transaction is pending...")
-        tx_hash, sold_usd = sell_token(user_id, trade['contract'], amount_token, context=context, chat_id=update.message.chat_id)
-        if tx_hash.startswith('0x'):
-            pending_msg.edit_text(f" Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
-            users[user_id]['trades'][trade_idx]['amount_token'] -= amount_token
-            users[user_id]['trades'][trade_idx]['buy_cost_usd'] -= (pct / 100) * users[user_id]['trades'][trade_idx]['buy_cost_usd']
-            if users[user_id]['trades'][trade_idx]['amount_token'] <= 0:
-                if 'message_id' in trade:
-                    try:
-                        context.bot.delete_message(chat_id=update.message.chat_id, message_id=trade['message_id'])
-                    except:
-                        pass
-                del users[user_id]['trades'][trade_idx]
-            save_users(users)
-        else:
-            pending_msg.edit_text(f" Transaction failed: {tx_hash}")
+        def async_handle_custom_sell(contract, amount_token, user_id, chat_id, pending_msg_id, trade_idx):
+            tx_hash, sold_usd = sell_token(user_id, contract, amount_token)
+            if tx_hash.startswith('0x'):
+                context.bot.edit_message_text(chat_id=chat_id, message_id=pending_msg_id, text=f" Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
+                trade = users[user_id]['trades'][trade_idx]
+                users[user_id]['trades'][trade_idx]['amount_token'] -= amount_token
+                users[user_id]['trades'][trade_idx]['buy_cost_usd'] -= (pct / 100) * users[user_id]['trades'][trade_idx]['buy_cost_usd']
+                if users[user_id]['trades'][trade_idx]['amount_token'] <= 0:
+                    if 'message_id' in trade:
+                        try:
+                            context.bot.delete_message(chat_id=chat_id, message_id=trade['message_id'])
+                        except:
+                            pass
+                    del users[user_id]['trades'][trade_idx]
+                save_users(users)
+            else:
+                context.bot.edit_message_text(chat_id=chat_id, message_id=pending_msg_id, text=f" Transaction failed: {tx_hash}")
+        context.dispatcher.run_async(async_handle_custom_sell, trade['contract'], amount_token, user_id, update.message.chat_id, pending_msg.message_id, trade_idx, update=update)
         return
 
 # Command: /p
@@ -1236,18 +1251,21 @@ def button_callback(update, context):
         trade['amount_token'] = current_balance
         save_users(users)
         pending_msg = query.message.reply_text(" Your sell transaction is pending...")
-        tx_hash, sold_usd = sell_token(user_id, trade['contract'], trade['amount_token'], context=context, chat_id=query.message.chat_id)
-        if tx_hash.startswith('0x'):
-            pending_msg.edit_text(f" Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
-            if 'message_id' in trade:
-                try:
-                    context.bot.delete_message(chat_id=query.message.chat_id, message_id=trade['message_id'])
-                except:
-                    pass
-            del users[user_id]['trades'][trade_idx]
-            save_users(users)
-        else:
-            pending_msg.edit_text(f" Transaction failed: {tx_hash}")
+        def async_handle_sell_100(contract, amount_token, user_id, chat_id, pending_msg_id, trade_idx):
+            tx_hash, sold_usd = sell_token(user_id, contract, amount_token)
+            if tx_hash.startswith('0x'):
+                context.bot.edit_message_text(chat_id=chat_id, message_id=pending_msg_id, text=f" Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
+                trade = users[user_id]['trades'][trade_idx]
+                if 'message_id' in trade:
+                    try:
+                        context.bot.delete_message(chat_id=chat_id, message_id=trade['message_id'])
+                    except:
+                        pass
+                del users[user_id]['trades'][trade_idx]
+                save_users(users)
+            else:
+                context.bot.edit_message_text(chat_id=chat_id, message_id=pending_msg_id, text=f" Transaction failed: {tx_hash}")
+        context.dispatcher.run_async(async_handle_sell_100, trade['contract'], trade['amount_token'], user_id, query.message.chat_id, pending_msg.message_id, trade_idx, update=update)
 
     elif data.startswith('sell_custom_'):
         trade_idx = int(data.split('_')[2])
@@ -1300,10 +1318,15 @@ def set_gas(update, context):
     except:
         update.message.reply_text("Invalid gwei value.")
 
+# Error handler
+def error_callback(update, context):
+    print(f"An error occurred: {context.error}")
+
 def main():
     # Build the bot
     updater = Updater(API_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
+    dispatcher.add_error_handler(error_callback)
     # Add handlers
     dispatcher.add_handler(CommandHandler("p", p))
     dispatcher.add_handler(CallbackQueryHandler(button_callback))
