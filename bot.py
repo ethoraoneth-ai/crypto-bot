@@ -66,7 +66,8 @@ ERC20_ABI = [
         "outputs": [{"name": "", "type": "string"}],
         "type": "function"
     }
-]Minimal Uniswap V2 Router ABIUNISWAP_ROUTER_ABI = [
+]Minimal Uniswap V2 Router
+ABIUNISWAP_ROUTER_ABI = [
     {
         "inputs": [
             {"internalType": "uint256", "name": "amountOutMin", "type": "uint256"},
@@ -1174,5 +1175,6 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.job_queue.run_repeating(monitor_trades, interval=60, first=10)# Start the bot
 app.run_polling()if name == "main":
     main()
+
 
 
