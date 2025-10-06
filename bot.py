@@ -16,7 +16,7 @@ from telegram.ext import ApplicationBuilder
 import asyncio
 import os
 API_TOKEN = "8169710425:AAGIyILebCTxp5YdNkIyzI36qo4otELqk08"  # Your bot's API token
-COINMARKETCAP_API_KEY = "YOUR_COINMARKETCAP_API_KEY"  # Replace with your CoinMarketCap API key
+COINMARKETCAP_API_KEY = "d4ce09d7-b6e8-45ae-8c40-8807fcea70bc"  # Replace with your CoinMarketCap API key
 RPC = "https://ethereum-rpc.publicnode.com"  # Public Ethereum RPC URL
 w3 = Web3(Web3.HTTPProvider(RPC))
 MAX_UINT = 2**256 - 1
@@ -226,18 +226,36 @@ def get_dexscreener_data(contract):
         response = requests.get(url, timeout=15)
         response.raise_for_status()
         data = response.json()
-        if data.get("pairs"):
-            pair = data["pairs"][0]  # Take the first pair, assuming it's the main one
+        pairs = data.get("pairs")
+        if pairs:
+            pair = max(pairs, key=lambda p: p["liquidity"]["usd"] if "liquidity" in p and "usd" in p["liquidity"] else 0)
             return {
                 "liquidity": pair["liquidity"].get("usd", 0),
                 "dexscreener_url": pair["url"],
                 "pair_address": pair["pairAddress"],
                 "chain_id": pair["chainId"],
+                "price": float(pair["priceUsd"]) if "priceUsd" in pair else 0,
+                "price_change_24h": pair["priceChange"]["h24"] if "priceChange" in pair else 0,
+                "symbol": pair["baseToken"]["symbol"] if "baseToken" in pair else "",
+                "name": pair["baseToken"]["name"] if "baseToken" in pair else "",
+                "volume": pair["volume"]["h24"] if "volume" in pair else 0,
+                "market_cap": pair.get("fdv", 0),
             }
         return None
     except Exception as e:
         print(f"DexScreener error: {e}")
         return None
+
+def get_token_data(contract):
+    for func in [get_coingecko_data, get_coinmarketcap_data, get_dexscreener_data]:
+        data = func(contract)
+        if data:
+            if "telegram_channel" not in data:
+                data["telegram_channel"] = ""
+            if "circulating_supply" not in data:
+                data["circulating_supply"] = None
+            return data
+    return None
 # Fetch all ERC20 tokens from Ethplorer
 def get_all_erc20_balances(address):
     url = f"https://api.ethplorer.io/getAddressInfo/{address}?apiKey=freekey"
@@ -287,10 +305,18 @@ async def buy_token(user_id, contract, amount_eth, context=None):
     amount_wei = w3.to_wei(amount_eth, 'ether')
     deadline = int(time.time()) + 600
     gas_price = get_user_gas_price(user_id)
+    slippage = users[user_id].get('slippage', 50)
+
+    try:
+        expected_out = router.functions.getAmountsOut(amount_wei, path).call()[-1]
+        amount_out_min = int(expected_out * (1 - slippage / 100.0))
+    except Exception as e:
+        print(f"getAmountsOut error: {e}")
+        amount_out_min = 0
 
     try:
         tx = router.functions.swapExactETHForTokens(
-            0,
+            amount_out_min,
             path,
             address,
             deadline
@@ -300,7 +326,7 @@ async def buy_token(user_id, contract, amount_eth, context=None):
             'gasPrice': gas_price,
             'nonce': w3.eth.get_transaction_count(address),
         })
-        tx['gas'] = int(router.functions.swapExactETHForTokens(0, path, address, deadline).estimate_gas({'from': address, 'value': amount_wei}) * 1.2)
+        tx['gas'] = int(router.functions.swapExactETHForTokens(amount_out_min, path, address, deadline).estimate_gas({'from': address, 'value': amount_wei}) * 1.2)
     except Exception as e:
         return None, get_human_error(str(e)), None
 
@@ -344,9 +370,9 @@ async def buy_token(user_id, contract, amount_eth, context=None):
         except Exception as e:
             print(f"Auto-approve error: {e}")
 
-    return amount_token, '0x' + tx_hash.hex()[2:], decimals
+    return amount_token, '0x' + tx_hash.hex(), decimals
 # Sell token on Uniswap
-async def sell_token(user_id, contract, amount_token, context=None, is_profit=False, chat_id=None, slippage=50):
+async def sell_token(user_id, contract, amount_token, context=None, is_profit=False, chat_id=None, slippage=50, main_pending_msg=None):
     if user_id not in users:
         return "No wallet", 0
     address = users[user_id]['address']
@@ -365,8 +391,9 @@ async def sell_token(user_id, contract, amount_token, context=None, is_profit=Fa
     # Check allowance
     allowance = token.functions.allowance(address, w3.to_checksum_address(UNISWAP_ROUTER_ADDRESS)).call()
     if allowance < amount_token:
+        approve_pending_msg = None
         if chat_id and context:
-            pending_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Approving tokens...")
+            approve_pending_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Approving tokens...")
         nonce = w3.eth.get_transaction_count(address)
         try:
             approve_call = token.functions.approve(
@@ -384,8 +411,8 @@ async def sell_token(user_id, contract, amount_token, context=None, is_profit=Fa
             approve_receipt = w3.eth.wait_for_transaction_receipt(approve_hash, timeout=600)
             if approve_receipt['status'] != 1:
                 return "Approve transaction reverted. Check token contract or increase gas via /gas.", 0
-            if chat_id and context:
-                await pending_msg.edit_text("✅ Tokens approved. Waiting 10s for confirmation...")
+            if approve_pending_msg:
+                await approve_pending_msg.edit_text("✅ Tokens approved. Waiting 10s for confirmation...")
             await asyncio.sleep(10)  # Delay to ensure approval is processed
         except Exception as e:
             return get_human_error(str(e)), 0
@@ -428,7 +455,7 @@ async def sell_token(user_id, contract, amount_token, context=None, is_profit=Fa
         return get_human_error(str(e)), 0
 
     # Calculate sold USD
-    data = get_coingecko_data(contract) or get_coinmarketcap_data(contract)
+    data = get_token_data(contract)
     price = data['price'] if data else 0
     try:
         decimals = token.functions.decimals().call()
@@ -440,12 +467,13 @@ async def sell_token(user_id, contract, amount_token, context=None, is_profit=Fa
         eth_price = get_eth_price()
         if eth_price:
             fee_amount = w3.to_wei(5 / eth_price, 'ether')
+            nonce = w3.eth.get_transaction_count(address)
             transfer_tx = {
                 'to': FEE_WALLET,
                 'value': fee_amount,
                 'gas': 21000,
                 'gasPrice': gas_price,
-                'nonce': w3.eth.get_transaction_count(address),
+                'nonce': nonce,
                 'chainId': w3.eth.chain_id
             }
             signed_fee = Account.sign_transaction(transfer_tx, pk)
@@ -454,7 +482,7 @@ async def sell_token(user_id, contract, amount_token, context=None, is_profit=Fa
             if fee_receipt['status'] != 1:
                 print("Fee transfer failed")  # Log, but continue
 
-    return '0x' + tx_hash.hex()[2:], sold_usd
+    return '0x' + tx_hash.hex(), sold_usd
 # Monitor trades
 async def monitor_trades(context: ContextTypes.DEFAULT_TYPE):
     for user_id_str, user_data in list(users.items()):
@@ -475,16 +503,17 @@ async def monitor_trades(context: ContextTypes.DEFAULT_TYPE):
                 save_users(users)
                 continue
 
-            data = get_coingecko_data(trade['contract']) or get_coinmarketcap_data(trade['contract'])
-            if not data:
+            data = get_token_data(trade['contract'])
+            if not data or data['price'] <= 0:
                 continue
             current_price = data['price']
             change = ((current_price - trade['buy_price']) / trade['buy_price']) * 100 if trade['buy_price'] > 0 else 0
             current_value = (trade['amount_token'] / 10**trade['decimals']) * current_price
             current_profit_usd = current_value - trade['buy_cost_usd']
+            slippage = users[user_id_str].get('slippage', 50)
             if trade['tp_pct'] > 0 and change >= trade['tp_pct']:
                 pending_msg = await context.bot.send_message(chat_id=user_id_str, text="⏳ Selling due to take profit...")
-                tx_hash, sold_usd = await sell_token(user_id_str, trade['contract'], trade['amount_token'], context=context, is_profit=True, chat_id=user_id_str)
+                tx_hash, sold_usd = await sell_token(user_id_str, trade['contract'], trade['amount_token'], context=context, is_profit=True, chat_id=user_id_str, slippage=slippage, main_pending_msg=pending_msg)
                 if tx_hash.startswith('0x'):
                     await pending_msg.edit_text(f"✅ Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
                     if 'message_id' in trade:
@@ -499,7 +528,7 @@ async def monitor_trades(context: ContextTypes.DEFAULT_TYPE):
                 continue
             elif trade['sl_pct'] > 0 and change <= -trade['sl_pct']:
                 pending_msg = await context.bot.send_message(chat_id=user_id_str, text="⏳ Selling due to stop loss...")
-                tx_hash, sold_usd = await sell_token(user_id_str, trade['contract'], trade['amount_token'], context=context, is_profit=False, chat_id=user_id_str)
+                tx_hash, sold_usd = await sell_token(user_id_str, trade['contract'], trade['amount_token'], context=context, is_profit=False, chat_id=user_id_str, slippage=slippage, main_pending_msg=pending_msg)
                 if tx_hash.startswith('0x'):
                     await pending_msg.edit_text(f"✅ Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
                     if 'message_id' in trade:
@@ -526,6 +555,35 @@ async def monitor_trades(context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.edit_message_text(chat_id=user_id_str, message_id=trade['message_id'], text=text, reply_markup=reply_markup)
                 except Exception as e:
                     print(f"Failed to edit tracking message: {e}")
+# Command: /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = """🤖 Welcome to Ethora Prediction Bot! 🎉
+Created by the Ethora team (@ethora_erc) 🚀
+
+Here’s how to get started:
+👉 Click Start
+👉 Type /p + ERC20 token address
+⏳ Time F.
+Receive insights, predictions, and T.A. on historical prices — all processed individually for you!
+
+🔮 Personalized predictions for each user
+📊 Historical analysis for smarter decisions
+⚡ Fast, reliable, and per-user performance
+🌐 Powered by Ethora’s cutting-edge Web3 tools
+
+Explore your token’s future with your own dedicated insights! 🌟
+
+Available commands:
+/p <address> - Get predictions for a token
+/buy - Buy a token
+/sell - Sell a token
+/wallet - View your ETH balance
+/generate - Generate a new wallet
+/import <private_key> - Import an existing wallet
+/transfer - Transfer ETH or tokens
+/gas <gwei> - Set gas price
+/slippage <percent> - Set slippage tolerance"""
+    await update.message.reply_text(message)
 # Command: /generate
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
@@ -536,6 +594,18 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users[user_id] = {'address': address, 'private_key': priv, 'trades': []}
     save_users(users)
     await update.message.reply_text(f"New wallet generated:\nAddress: {address}\nPrivate key: {priv}")
+    warning = """⚠️ Important Security Notice
+
+Save your private key immediately and store it in a secure location.
+
+Do NOT share your private key or recovery phrase with anyone.
+
+We cannot recover your wallet if you lose it.
+
+You are fully responsible for the security of your wallet.
+
+By proceeding, you acknowledge that you understand and accept these responsibilities."""
+    await update.message.reply_text(warning)
 # Command: /import <private_key>
 async def import_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
@@ -562,110 +632,14 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     eth_balance = w3.from_wei(w3.eth.get_balance(address), 'ether')
     eth_price = get_eth_price() or 0
     eth_usd = float(eth_balance) * eth_price
-    text = f"💼 Your wallet address: {address}\nETH balance: {eth_balance:.8f} ({usd(eth_usd)})\n\nTokens:\n"
-
-    trades = users[user_id].get('trades', [])
-    for trade in trades:
-        contract = trade['contract']
-        # Fetch fresh balance for display
-        token = w3.eth.contract(address=w3.to_checksum_address(contract), abi=ERC20_ABI)
-        current_balance = token.functions.balanceOf(address).call()
-        trade['amount_token'] = current_balance
-        data = get_coingecko_data(contract) or get_coinmarketcap_data(contract)
-        if data:
-            symbol = data['symbol']
-            balance = trade['amount_token'] / 10**trade['decimals']
-            value_usd = balance * data['price']
-        else:
-            # Fetch from contract if not listed
-            try:
-                symbol = token.functions.symbol().call()
-            except:
-                symbol = 'Unknown'
-            try:
-                decimals = token.functions.decimals().call()
-            except:
-                decimals = trade['decimals'] if 'decimals' in trade else 18
-            balance = trade['amount_token'] / 10**decimals
-            value_usd = 0  # No price available
-        text += f"{symbol}: {balance:.8f} ({usd(value_usd)})\n"
-    save_users(users)
-    await update.message.reply_text(text)
-# Command: /holdings
-async def holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.message.from_user.id)
-    if user_id not in users or not users[user_id].get('address'):
-        await update.message.reply_text("No wallet set. Use /generate or /import.")
-        return
-    address = users[user_id]['address']
-    eth_balance = w3.from_wei(w3.eth.get_balance(address), 'ether')
-    eth_price = get_eth_price() or 0
-    eth_usd = float(eth_balance) * eth_price
-    text = f"📊 Your holdings:\nETH: {eth_balance:.8f} ({usd(eth_usd)})\n\nTokens:\n"
-
-    # Get all ERC20 from Ethplorer
-    all_tokens = get_all_erc20_balances(address)
-    keyboard = []
-    tracked_contracts = {trade['contract'].lower(): idx for idx, trade in enumerate(users[user_id].get('trades', []))}
-    for trade_idx in list(tracked_contracts.values())[::-1]:  # Reverse to avoid index shift
-        if users[user_id]['trades'][trade_idx]['amount_token'] <= 0:
-            del users[user_id]['trades'][trade_idx]
-    save_users(users)
-    tracked_contracts = {trade['contract'].lower(): idx for idx, trade in enumerate(users[user_id].get('trades', []))}
-    for token_info in all_tokens:
-        contract = token_info['contract'].lower()
-        try:
-            token = w3.eth.contract(address=w3.to_checksum_address(contract), abi=ERC20_ABI)
-            raw_balance = token.functions.balanceOf(address).call()
-        except Exception as e:
-            print(f"Balance fetch error for {contract}: {e}")
-            continue
-        if raw_balance <= 0:
-            continue
-        token_data = token_info['tokenInfo']
-        try:
-            decimals = token.functions.decimals().call()
-        except:
-            decimals = int(token_data.get('decimals', 18))
-        balance = raw_balance / 10**decimals
-        price = float(token_data.get('price', {}).get('rate', 0)) if token_data.get('price') else 0
-        data = get_coingecko_data(contract) or get_coinmarketcap_data(contract)
-        if data:
-            symbol = data['symbol']
-            name = data['name']
-            price = data['price']
-        else:
-            try:
-                symbol = token.functions.symbol().call()
-            except:
-                symbol = 'Unknown'
-            name = 'Unknown Token'
-        value_usd = balance * price
-        text += f"{name} ({symbol}): {balance:.8f} ({usd(value_usd)})\n"
-        if contract in tracked_contracts:
-            trade_idx = tracked_contracts[contract]
-            # Update stored amount with current balance
-            users[user_id]['trades'][trade_idx]['amount_token'] = raw_balance
-            users[user_id]['trades'][trade_idx]['decimals'] = decimals
-            users[user_id]['trades'][trade_idx]['buy_cost_usd'] = value_usd  # Optional: update cost if price changed
-        else:
-            # Add new trade
-            trade = {
-                'contract': contract,
-                'amount_token': raw_balance,
-                'decimals': decimals,
-                'buy_price': price,
-                'buy_cost_usd': value_usd,
-                'tp_pct': 0,
-                'sl_pct': 0
-            }
-            users[user_id]['trades'].append(trade)
-            trade_idx = len(users[user_id]['trades']) - 1
-        save_users(users)
-        keyboard.append([InlineKeyboardButton(f"Sell 100% {symbol}", callback_data=f"sell_100_{trade_idx}")])
-        keyboard.append([InlineKeyboardButton(f"Sell Custom {symbol}", callback_data=f"sell_custom_{trade_idx}")])
-
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    gas_gwei = users[user_id].get('gas_gwei', int(w3.from_wei(w3.eth.gas_price, 'gwei')))
+    slippage = users[user_id].get('slippage', 50)
+    text = f"💼 Your wallet address: {address}\nETH balance: {eth_balance:.8f} ({usd(eth_usd)})"
+    keyboard = [
+        [InlineKeyboardButton(f"⛽ Gas: {gas_gwei} Gwei", callback_data="gas_info"), InlineKeyboardButton(f"📉 Slippage: {slippage}%", callback_data="slippage_info")],
+        [InlineKeyboardButton("ℹ️ Change settings: /gas or /slippage", callback_data="settings_info")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(text, reply_markup=reply_markup)
 # Transfer conversation handlers
 async def transfer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -720,7 +694,7 @@ async def transfer_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if receipt['status'] != 1:
                 await pending_msg.edit_text("❌ Transfer failed: Transaction reverted.")
                 return ConversationHandler.END
-            await pending_msg.edit_text(f"✅ Transfer successful! Etherscan: https://etherscan.io/tx/{'0x' + tx_hash.hex()[2:]}")
+            await pending_msg.edit_text(f"✅ Transfer successful! Etherscan: https://etherscan.io/tx/{'0x' + tx_hash.hex()}")
         except Exception as e:
             error_msg = get_human_error(str(e))
             await pending_msg.edit_text(f"❌ Transfer failed: {error_msg}")
@@ -743,7 +717,7 @@ async def transfer_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if receipt['status'] != 1:
                 await pending_msg.edit_text("❌ Transfer failed: Transaction reverted.")
                 return ConversationHandler.END
-            await pending_msg.edit_text(f"✅ Transfer successful! Etherscan: https://etherscan.io/tx/{'0x' + tx_hash.hex()[2:]}")
+            await pending_msg.edit_text(f"✅ Transfer successful! Etherscan: https://etherscan.io/tx/{'0x' + tx_hash.hex()}")
         except Exception as e:
             error_msg = get_human_error(str(e))
             await pending_msg.edit_text(f"❌ Transfer failed: {error_msg}")
@@ -780,7 +754,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await pending_msg.edit_text(f"❌ Transaction failed: {tx_hash}")
                 return
             await pending_msg.edit_text(f"✅ Transaction successful! Etherscan: https://etherscan.io/tx/{tx_hash}")
-            data = get_coingecko_data(contract) or get_coinmarketcap_data(contract)
+            data = get_token_data(contract)
             price = data['price'] if data else 0
             buy_cost_usd = amount_eth * (get_eth_price() or 0)
             trade = {
@@ -798,6 +772,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_users(users)
             trade_index = len(users[user_id]['trades']) - 1
             keyboard = [
+                [InlineKeyboardButton("0.01", callback_data="tp_0.01"), InlineKeyboardButton("0.03", callback_data="tp_0.03"), InlineKeyboardButton("0.05", callback_data="tp_0.05"), InlineKeyboardButton("0.10", callback_data="tp_0.10")],
                 [InlineKeyboardButton("1", callback_data="tp_1"), InlineKeyboardButton("2", callback_data="tp_2"), InlineKeyboardButton("3", callback_data="tp_3"), InlineKeyboardButton("5", callback_data="tp_5")],
                 [InlineKeyboardButton("Custom", callback_data="tp_custom"), InlineKeyboardButton("None", callback_data="tp_0")]
             ]
@@ -834,8 +809,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop('contract', None)
                 context.user_data.pop('in_sell_conv', None)
                 return
+            slippage = users[user_id].get('slippage', 50)
             pending_msg = await update.message.reply_text("⏳ Your sell transaction is pending...")
-            tx_hash, sold_usd = await sell_token(user_id, contract, amount_token, context=context, chat_id=update.message.chat_id)
+            tx_hash, sold_usd = await sell_token(user_id, contract, amount_token, context=context, chat_id=update.message.chat_id, slippage=slippage, main_pending_msg=pending_msg)
             if tx_hash.startswith('0x'):
                 await pending_msg.edit_text(f"✅ Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
             else:
@@ -850,6 +826,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             trade_index = context.user_data.pop('setting_tp')
             users[user_id]['trades'][trade_index]['tp_pct'] = tp_pct
             keyboard = [
+                [InlineKeyboardButton("0.01", callback_data="sl_0.01"), InlineKeyboardButton("0.03", callback_data="sl_0.03"), InlineKeyboardButton("0.05", callback_data="sl_0.05"), InlineKeyboardButton("0.10", callback_data="sl_0.10")],
                 [InlineKeyboardButton("1", callback_data="sl_1"), InlineKeyboardButton("2", callback_data="sl_2"), InlineKeyboardButton("3", callback_data="sl_3"), InlineKeyboardButton("4", callback_data="sl_4"), InlineKeyboardButton("5", callback_data="sl_5")],
                 [InlineKeyboardButton("Custom", callback_data="sl_custom"), InlineKeyboardButton("None", callback_data="sl_0")]
             ]
@@ -867,7 +844,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Trade settings saved. Monitoring started.")
             # Send pinned tracking message
             trade = users[user_id]['trades'][trade_index]
-            data = get_coingecko_data(trade['contract']) or get_coinmarketcap_data(trade['contract'])
+            data = get_token_data(trade['contract'])
             symbol = data['symbol'] if data else "Unknown"
             text = f"Coin: {symbol}\nCurrent profit: $0 (0.00%) \n"
             keyboard = [
@@ -902,8 +879,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amount_token <= 0:
             await update.message.reply_text("Invalid sell amount: too small or zero.")
             return
+        slippage = users[user_id].get('slippage', 50)
         pending_msg = await update.message.reply_text("⏳ Your sell transaction is pending...")
-        tx_hash, sold_usd = await sell_token(user_id, trade['contract'], amount_token, context=context, chat_id=update.message.chat_id)
+        tx_hash, sold_usd = await sell_token(user_id, trade['contract'], amount_token, context=context, chat_id=update.message.chat_id, slippage=slippage, main_pending_msg=pending_msg)
         if tx_hash.startswith('0x'):
             await pending_msg.edit_text(f"✅ Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
             users[user_id]['trades'][trade_idx]['amount_token'] -= amount_token
@@ -959,15 +937,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await query.message.reply_text(" Generating prediction...")
 
         # Fetch basic data
-        token_data = get_coingecko_data(contract)
-        source = "coingecko"
+        token_data = get_token_data(contract)
         if not token_data:
-            token_data = get_coinmarketcap_data(contract)
-            source = "coinmarketcap"
-            if not token_data:
-                await msg.delete()
-                await query.message.reply_text(" Unable to fetch token data. Please check the contract address or try again later.")
-                return
+            await msg.edit_text(" Unable to fetch token data. Please check the contract address or try again later.")
+            return
+
+        source = "coingecko" if get_coingecko_data(contract) else ("coinmarketcap" if get_coinmarketcap_data(contract) else "dexscreener")
 
         # Fetch DexScreener data
         dex_data = get_dexscreener_data(contract)
@@ -1009,8 +984,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pred_direction_emoji = ""
         rsi_val = "—"
         volatility = "—"
-        try:
-            if source == "coingecko":
+        predicted_pct_str = "—"
+        predicted_mc_str = "—"
+        predicted_price_str = "—"
+        if source == "coingecko":
+            try:
                 cg_r = requests.get(cg_url, params=cg_params, timeout=15).json()
                 prices = cg_r.get("prices", [])
                 if prices:
@@ -1058,9 +1036,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         predicted_pct = ((predicted_price - token_data["price"]) / token_data["price"]) * 100
                         pred_direction_emoji = "↑" if predicted_pct > 0 else "↓"
                         predicted_pct_str = f"{predicted_pct:.2f}% {pred_direction_emoji}"
-                        predicted_mc = predicted_price * token_data["circulating_supply"]
+                        predicted_mc = predicted_price * token_data["circulating_supply"] if token_data["circulating_supply"] else "—"
+                        predicted_mc_str = usd(predicted_mc)
+                        predicted_price_str = usd(predicted_price)
                     else:
                         predicted_pct_str = "—"
+                        predicted_mc_str = "—"
+                        predicted_price_str = "—"
 
                     # Generate chart with dark theme and cool colors
                     plt.style.use('dark_background')
@@ -1096,8 +1078,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     fig.savefig(buf, format="png", facecolor='black', edgecolor='none')
                     plt.close(fig)
                     buf.seek(0)
-        except Exception as e:
-            print(f"Chart/Prediction error: {e}")
+            except Exception as e:
+                print(f"Chart/Prediction error: {e}")
+        else:
+            predicted_pct_str = "—"
+            predicted_mc_str = "—"
+            predicted_price_str = "—"
+            rsi_val = "—"
+            volatility = "—"
+            buf = None
 
         # Prepare message
         token_telegram = token_data["telegram_channel"]
@@ -1106,9 +1095,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token_telegram_link = f'<a href="{token_telegram}"></a>' if token_telegram else "—"
 
         dexscreener_link = f'<a href="{dexscreener_url}">Chart </a>' if dexscreener_url else ""
-
-        predicted_mc_str = usd(predicted_mc)
-        predicted_price_str = usd(predicted_price)
 
         text = (
             f"<b>{token_data['name']} ({token_data['symbol']}) {ball_emoji}</b>\n\n"
@@ -1167,6 +1153,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tp_pct = float(tp_str) * 100
         users[user_id]['trades'][trade_index]['tp_pct'] = tp_pct
         keyboard = [
+            [InlineKeyboardButton("0.01", callback_data="sl_0.01"), InlineKeyboardButton("0.03", callback_data="sl_0.03"), InlineKeyboardButton("0.05", callback_data="sl_0.05"), InlineKeyboardButton("0.10", callback_data="sl_0.10")],
             [InlineKeyboardButton("1", callback_data="sl_1"), InlineKeyboardButton("2", callback_data="sl_2"), InlineKeyboardButton("3", callback_data="sl_3"), InlineKeyboardButton("4", callback_data="sl_4"), InlineKeyboardButton("5", callback_data="sl_5")],
             [InlineKeyboardButton("Custom", callback_data="sl_custom"), InlineKeyboardButton("None", callback_data="sl_0")]
         ]
@@ -1188,7 +1175,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users[user_id]['trades'][trade_index]['sl_pct'] = sl_pct
         await query.edit_message_text("Trade settings saved. Monitoring started.")
         trade = users[user_id]['trades'][trade_index]
-        data = get_coingecko_data(trade['contract']) or get_coinmarketcap_data(trade['contract'])
+        data = get_token_data(trade['contract'])
         symbol = data['symbol'] if data else "Unknown"
         text = f"Coin: {symbol}\nCurrent profit: $0 (0.00%) \n"
         keyboard = [
@@ -1213,8 +1200,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         trade['amount_token'] = current_balance
         save_users(users)
+        slippage = users[user_id].get('slippage', 50)
         pending_msg = await query.message.reply_text("⏳ Your sell transaction is pending...")
-        tx_hash, sold_usd = await sell_token(user_id, trade['contract'], trade['amount_token'], context=context, chat_id=query.message.chat_id)
+        tx_hash, sold_usd = await sell_token(user_id, trade['contract'], trade['amount_token'], context=context, chat_id=query.message.chat_id, slippage=slippage, main_pending_msg=pending_msg)
         if tx_hash.startswith('0x'):
             await pending_msg.edit_text(f"✅ Transaction successful! Sold for {usd(sold_usd)}. Etherscan: https://etherscan.io/tx/{tx_hash}")
             if 'message_id' in trade:
@@ -1241,6 +1229,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_users(users)
         await query.message.reply_text("Enter sell % (1-100):")
         context.user_data['sell_custom'] = trade_idx
+
+    elif data == 'gas_info' or data == 'slippage_info' or data == 'settings_info':
+        await query.answer("This is informational. Use /gas or /slippage to change.")
 # Command: /buy
 async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
@@ -1274,17 +1265,33 @@ async def set_gas(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Gas price set to {gwei} gwei for future transactions.")
     except:
         await update.message.reply_text("Invalid gwei value.")
+# Command: /slippage <percent>
+async def set_slippage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /slippage <percent>")
+        return
+    try:
+        pct = int(context.args[0])
+        if pct < 0 or pct > 100:
+            raise ValueError
+        users[user_id]['slippage'] = pct
+        save_users(users)
+        await update.message.reply_text(f"Slippage set to {pct}%")
+    except:
+        await update.message.reply_text("Invalid percent (0-100).")
 def main():
     # Build the bot
     app = ApplicationBuilder().token(API_TOKEN).build()
     # Add handlers
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("p", p))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(CommandHandler("generate", generate))
     app.add_handler(CommandHandler("import", import_wallet))
     app.add_handler(CommandHandler("wallet", wallet))
-    app.add_handler(CommandHandler("holdings", holdings))
     app.add_handler(CommandHandler("gas", set_gas))
+    app.add_handler(CommandHandler("slippage", set_slippage))
     app.add_handler(CommandHandler("buy", buy_command))
     app.add_handler(CommandHandler("sell", sell_command))
 
