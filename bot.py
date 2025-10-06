@@ -1106,7 +1106,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f" <b>Token Telegram:</b> {token_telegram_link}\n"
             f" <b>RSI:</b> {rsi_val}\n"
             f" <b>Volatility:</b> {volatility}\n\n"
-            f" <b>{tf_display} Prediction (80-90% Accuracy)</b>\n"
+            f" <b>{tf_display} Prediction </b>\n"
             f"├─  <i>Market Cap:</i> {predicted_mc_str} {pred_direction_emoji}\n"
             f"├─  <i>Price:</i> {predicted_price_str} {pred_direction_emoji}\n"
             f"└─  <i>Change:</i> {predicted_pct_str}\n\n"
@@ -1317,4 +1317,5 @@ def main():
     app.run_polling()
 if __name__ == "__main__":
     main()
+
 
