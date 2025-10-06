@@ -15,7 +15,7 @@ import json
 from telegram.ext import ApplicationBuilder
 import asyncio
 import os
-API_TOKEN = "8169710425:AAGIyILebCTxp5YdNkIyzI36qo4otELqk08"  # Your bot's API token
+API_TOKEN = "8422472212:AAE6ALc3DGFYjhTBgqLmUGlY5bJgc0LeoaA"  # Your bot's API token
 COINMARKETCAP_API_KEY = "d4ce09d7-b6e8-45ae-8c40-8807fcea70bc"  # Replace with your CoinMarketCap API key
 RPC = "https://ethereum-rpc.publicnode.com"  # Public Ethereum RPC URL
 w3 = Web3(Web3.HTTPProvider(RPC))
@@ -1317,3 +1317,4 @@ def main():
     app.run_polling()
 if __name__ == "__main__":
     main()
+
