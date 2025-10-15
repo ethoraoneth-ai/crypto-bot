@@ -47,7 +47,7 @@ print("WebSocket provider initialized (async)")
 ETHERSCAN_API_KEY = "A7BTDUG1WKQTSD1238Z41P77BXN7GDCPKR"  # Replace with your Etherscan API key from etherscan.io
 
 # Configuration
-API_TOKEN = "8422472212:AAE6ALc3DGFYjhTBgqLmUGlY5bJgc0LeoaA"  # Replace with your Telegram bot token
+API_TOKEN = "8169710425:AAGIyILebCTxp5YdNkIyzI36qo4otELqk08"  # Replace with your Telegram bot token
 COINMARKETCAP_API_KEY = "d4ce09d7-b6e8-45ae-8c40-8807fcea70bc"  # Replace with your CoinMarketCap API key
 ROUTER_V4 = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"  # V4 Universal Router for detection
 ROUTER_V2 = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"  # V2 Router for swaps
@@ -628,7 +628,7 @@ async def poll_tracked_wallets(context: ContextTypes.DEFAULT_TYPE):
             txs = get_recent_tx(tracked["address"])
             print(f"Polling {tracked['address']}: found {len(txs)} txs")  # Added logging
             max_time = tracked.get("last_processed_time", 0)
-            new_txs = [tx for tx in txs if int(tx['timeStamp']) > tracked["last_processed_time"]]
+            new_txs = sorted([tx for tx in txs if int(tx['timeStamp']) > tracked["last_processed_time"]], key=lambda x: int(x['timeStamp']))
             print(f"New txs: {len(new_txs)}")  # Added logging
             for tx in new_txs:
                 tx_time = int(tx['timeStamp'])
@@ -872,8 +872,9 @@ Available commands:
 /gas <gwei> - Set gas price
 /slippage <percent> - Set slippage tolerance
 /track - Track a wallet to copy trades
-/stop <address> or /stop all - Stop tracking a wallet or all
-/tracked - List tracked wallets"""
+/tracked - List tracked wallets
+/stop all - Stop tracking all wallets
+/stop <wallet> - Stop tracking a specific wallet"""
     await update.message.reply_text(message)
 
 # Command: /generate
@@ -1060,11 +1061,17 @@ async def track_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(users[user_id]["tracked_wallets"]) >= 5:
         await update.message.reply_text("Maximum of 5 tracked wallets reached.")
         return ConversationHandler.END
+    # Fetch recent txs to get the latest timestamp as baseline
+    txs = get_recent_tx(addr)
+    if txs:
+        last_processed_time = max(int(tx['timeStamp']) for tx in txs)
+    else:
+        last_processed_time = int(time.time())
     users[user_id]["tracked_wallets"].append(
         {
             "address": addr,
             "buy_amount_eth": amount,
-            "last_processed_time": 0,
+            "last_processed_time": last_processed_time,
         }
     )
     save_users(users)
@@ -1800,4 +1807,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
