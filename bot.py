@@ -47,7 +47,7 @@ print("WebSocket provider initialized (async)")
 ETHERSCAN_API_KEY = "A7BTDUG1WKQTSD1238Z41P77BXN7GDCPKR"  # Replace with your Etherscan API key from etherscan.io
 
 # Configuration
-API_TOKEN = "8169710425:AAGIyILebCTxp5YdNkIyzI36qo4otELqk08"  # Replace with your Telegram bot token
+API_TOKEN = "8422472212:AAE6ALc3DGFYjhTBgqLmUGlY5bJgc0LeoaA"  # Replace with your Telegram bot token
 COINMARKETCAP_API_KEY = "d4ce09d7-b6e8-45ae-8c40-8807fcea70bc"  # Replace with your CoinMarketCap API key
 ROUTER_V4 = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"  # V4 Universal Router for detection
 ROUTER_V2 = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"  # V2 Router for swaps
@@ -1800,3 +1800,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
